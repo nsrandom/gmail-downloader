@@ -5,6 +5,7 @@ venv/
 # Logs and intermediate files
 *.log
 state/
+__pycache__/
 
 # PII and sensitive data
 config.yaml

@@ -40,6 +40,93 @@ Edit `config.yaml`. Each pipeline needs:
 - `dest_folder` / `filename_template` -- support `{year}`, `{month}`,
   `{day}`, `{sender}`, `{subject}`, and (filename only) `{orig_filename}`.
 
+### Password-protected PDFs
+
+Some senders (banks especially) encrypt their statement PDFs. A pipeline can
+optionally carry the password, in which case the PDF is unlocked and the
+**saved copy is written with no password at all** -- so the archive stays
+readable without having to remember which password went with which sender.
+
+Prefer keeping the password out of the config file:
+
+```yaml
+  - name: bank_statements
+    query: '...'
+    dest_folder: "..."
+    filename_template: "..."
+    passwords_env: BANK_PDF_PASSWORD    # name of an env var
+```
+
+```bash
+export BANK_PDF_PASSWORD='...'          # in ~/.zshrc, or the cron entry
+```
+
+A literal `passwords: ["..."]` field also works if you'd rather not bother,
+but it leaves the password in plaintext in `config.yaml`.
+
+### When the password changed over time
+
+Senders rotate their password scheme, which leaves older mail needing an
+older password. Every password key accepts a **list**, and each candidate is
+tried in order until one opens the file:
+
+```yaml
+    passwords:
+      - "current-one"
+      - "the-one-before-that"
+      - "the-original"
+```
+
+```yaml
+    passwords_env:                      # same, via env vars
+      - BANK_PDF_PASSWORD
+      - BANK_PDF_PASSWORD_OLD
+```
+
+Both spellings work for either form: `password`/`passwords` and
+`password_env`/`passwords_env` are interchangeable, and each takes a single
+value or a list. If you set several, env vars are tried before literals.
+When a file opens with something other than the first candidate, the log
+says which one worked.
+
+**Quote numeric passwords.** Unquoted, YAML reads `01234` as octal (`668`)
+and `yes` as `true`. The runner re-reads password fields as raw text so this
+can't silently corrupt them, but quoting is the habit to keep.
+
+If a PDF can't be unlocked -- none of the passwords match, or an encryption
+scheme pypdf doesn't support -- it is still saved in its original encrypted
+form and an `ERROR` line is written to the log. Nothing is ever dropped
+because decryption failed, so it's worth grepping the log for `ERROR` after
+enabling a password for the first time.
+
+### Fixing PDFs that were already saved encrypted
+
+Adding a password only affects future downloads. Files already on disk stay
+encrypted, and the downloader won't revisit them -- their message IDs are in
+the pipeline state, so they count as done.
+
+`decrypt.py` fixes those in place. It walks each pipeline's `dest_folder`,
+and rewrites every encrypted PDF it can open with that pipeline's passwords:
+
+```bash
+python decrypt.py --dry-run     # report only, change nothing
+python decrypt.py               # decrypt everything it can
+python decrypt.py --pipeline bank_statements
+```
+
+Files that already open are left untouched, and a file no password unlocks is
+never modified -- it's just listed at the end, grouped by cause. Rewrites are
+atomic (temp file plus rename) and preserve timestamps, so an interruption
+can't leave a half-written statement behind. It's safe to re-run, and exits
+non-zero if anything is still encrypted.
+
+Don't try to fix these by deleting the state file and re-downloading: the
+re-fetched copies land alongside the encrypted ones as `..._1.pdf` rather
+than replacing them.
+
+Note that this only applies to PDFs whose password you already know; there's
+no cracking involved.
+
 ## 4. First run (interactive)
 
 ```bash
@@ -86,8 +173,19 @@ To force a full rescan for a pipeline, delete its state file.
 ## Running a single pipeline
 
 ```bash
-python gmail_pipeline.py --pipeline chase_checking_statement
+python gmail_pipeline.py --pipeline bank_statements
 ```
+
+## Previewing without downloading
+
+```bash
+python gmail_pipeline.py --dry-run
+```
+
+Reports the destination path each matched message would be written to,
+without fetching attachments, writing files, or updating state -- so the
+next real run still sees exactly the same messages as new. Run
+`python gmail_pipeline.py --help` for the full flag and config reference.
 
 ## Logs
 

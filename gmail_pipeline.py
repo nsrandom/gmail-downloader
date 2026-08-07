@@ -25,6 +25,7 @@ import os
 import re
 import sys
 from datetime import datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 
 import yaml
@@ -33,6 +34,13 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+try:
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.errors import PyPdfError
+except ImportError:  # only needed by pipelines that configure a password
+    PdfReader = PdfWriter = None
+    PyPdfError = Exception
 
 # Read-only scope -- this pipeline never sends, deletes, or modifies mail.
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
@@ -63,7 +71,13 @@ examples:
 config file:
   Each entry under `pipelines:` needs name, query, dest_folder and
   filename_template. `query` uses Gmail search syntax -- test it in the
-  Gmail search bar first.
+  Gmail search bar first. A pipeline whose sender password-protects its
+  PDFs may also set `passwords_env` (names of environment variables
+  holding them) or `passwords` (plaintext); singular `password_env` and
+  `password` work too. Each accepts one value or a list, and every
+  candidate is tried in turn -- useful when a sender rotated its password
+  and older files still need the old one. The saved copy is written
+  unencrypted.
 
 template variables:
   dest_folder and filename_template accept {year} {month} {day} {sender}
@@ -116,15 +130,98 @@ def get_gmail_service():
     return build("gmail", "v1", credentials=creds)
 
 
+# Keys holding literal passwords, and keys naming environment variables that
+# hold them. Every one accepts either a single value or a list of values.
+PASSWORD_KEYS = ("password", "passwords")
+PASSWORD_ENV_KEYS = ("password_env", "passwords_env")
+ALL_PASSWORD_KEYS = PASSWORD_KEYS + PASSWORD_ENV_KEYS
+
+
+class _RawStringLoader(yaml.SafeLoader):
+    """SafeLoader that tags every plain scalar as a string.
+
+    Passwords are often numeric, and YAML's implicit typing mangles them:
+    unquoted `01234` is read as octal (668), `1_2345` as 12345, and `yes` as
+    True. Password values are pulled from a parse using this loader so they
+    survive as the literal text, quoted or not.
+    """
+
+
+_RawStringLoader.yaml_implicit_resolvers = {}
+
+
 def load_config(path):
     with open(path, "r") as f:
-        cfg = yaml.safe_load(f)
+        text = f.read()
+    cfg = yaml.safe_load(text) or {}
+    # Second parse, used only to recover password values verbatim.
+    raw_cfg = yaml.load(text, Loader=_RawStringLoader) or {}
+
     pipelines = cfg.get("pipelines", [])
-    for p in pipelines:
+    raw_pipelines = raw_cfg.get("pipelines", [])
+
+    for i, p in enumerate(pipelines):
         for required in ("name", "query", "dest_folder", "filename_template"):
             if required not in p:
                 raise ValueError(f"Pipeline config missing required key '{required}': {p}")
+
+        # Overlay password fields from the raw-string parse (same file, so the
+        # entries line up by position).
+        raw = raw_pipelines[i] if i < len(raw_pipelines) else {}
+        for key in ALL_PASSWORD_KEYS:
+            if key in p and key in raw:
+                p[key] = raw[key]
+
+        if any(key in p for key in ALL_PASSWORD_KEYS) and PdfReader is None:
+            raise ImportError(
+                f"Pipeline '{p['name']}' configures a PDF password, which requires "
+                "pypdf. Install it with: pip install -r requirements.txt"
+            )
     return pipelines
+
+
+def as_list(value):
+    """Normalize a config value that may be a single item or a list."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value if v is not None and str(v) != ""]
+    return [str(value)] if str(value) != "" else []
+
+
+def resolve_passwords(pipeline):
+    """Return the ordered list of passwords to try for a pipeline.
+
+    Environment-variable keys come first (they keep the secret out of the
+    config file), then literal ones. Senders change their password scheme
+    over time, so every configured value is a candidate and the decrypter
+    tries them in order. Returns [] when the pipeline configures none.
+    """
+    candidates = []
+
+    for key in PASSWORD_ENV_KEYS:
+        for name in as_list(pipeline.get(key)):
+            value = os.environ.get(name)
+            if value:
+                candidates.append(value)
+            else:
+                logging.warning(
+                    f"  [{pipeline['name']}] {key} '{name}' is unset or empty; skipping it"
+                )
+
+    for key in PASSWORD_KEYS:
+        candidates.extend(as_list(pipeline.get(key)))
+
+    # Preserve order, drop duplicates.
+    seen = set()
+    ordered = [p for p in candidates if not (p in seen or seen.add(p))]
+
+    if not ordered and any(key in pipeline for key in ALL_PASSWORD_KEYS):
+        logging.warning(
+            f"  [{pipeline['name']}] no usable password resolved; "
+            "encrypted PDFs will be saved as-is"
+        )
+    return ordered
 
 
 def state_path_for(pipeline_name):
@@ -215,6 +312,63 @@ def unique_path(path, reserved=()):
         i += 1
 
 
+def decrypt_pdf(data, passwords, label):
+    """Strip password protection from PDF bytes.
+
+    `passwords` is an ordered list of candidates -- senders change their
+    password scheme over time, so older files in the same pipeline may need
+    an older password. Each is tried until one opens the file.
+
+    Returns (bytes, status). On any failure the ORIGINAL bytes come back
+    unchanged, so a wrong password or an unsupported encryption scheme
+    still archives the attachment rather than losing it -- the status is
+    logged loudly instead.
+    """
+    passwords = as_list(passwords)
+
+    try:
+        reader = PdfReader(BytesIO(data))
+    except (PyPdfError, ValueError) as e:
+        logging.error(f"  {label} could not be parsed as a PDF ({e}); left encrypted")
+        return data, "unreadable"
+
+    if not reader.is_encrypted:
+        return data, "not encrypted"
+
+    # The trailing empty password covers files that carry only an owner
+    # password (restrictions on printing/copying, but none to open).
+    attempts = list(passwords)
+    if "" not in attempts:
+        attempts.append("")
+
+    for index, attempt in enumerate(attempts):
+        try:
+            if reader.decrypt(attempt):
+                if index > 0 and attempt != "":
+                    # Worth surfacing: the first password no longer works for
+                    # this file, which usually means the sender rotated it.
+                    logging.info(f"  {label} unlocked with password #{index + 1}")
+                break
+        except (PyPdfError, NotImplementedError) as e:
+            logging.error(f"  {label} uses unsupported encryption ({e}); left encrypted")
+            return data, "unsupported"
+    else:
+        count = len(passwords)
+        plural = "password" if count == 1 else f"all {count} passwords"
+        logging.error(f"  {label} was not unlocked by {plural}; left encrypted")
+        return data, "wrong password"
+
+    try:
+        writer = PdfWriter(clone_from=reader)
+        buf = BytesIO()
+        writer.write(buf)
+    except (PyPdfError, ValueError) as e:
+        logging.error(f"  {label} unlocked but could not be rewritten ({e}); left encrypted")
+        return data, "rewrite failed"
+
+    return buf.getvalue(), "decrypted"
+
+
 def process_message(service, pipeline, message_id, dry_run=False, reserved=None):
     prefix = "[dry-run] " if dry_run else ""
     msg = service.users().messages().get(userId="me", id=message_id, format="full").execute()
@@ -232,7 +386,10 @@ def process_message(service, pipeline, message_id, dry_run=False, reserved=None)
         )
         return
 
+    passwords = resolve_passwords(pipeline)
+
     for part in pdf_parts:
+        pdf_status = None
         if dry_run:
             # Skip the attachment fetch entirely -- the body metadata already
             # carries the size, which is all we need to report.
@@ -248,6 +405,9 @@ def process_message(service, pipeline, message_id, dry_run=False, reserved=None)
                 .execute()
             )
             data = base64.urlsafe_b64decode(attachment["data"])
+            if passwords:
+                label = f"[{pipeline['name']}] {part.get('filename', 'attachment.pdf')}"
+                data, pdf_status = decrypt_pdf(data, passwords, label)
             size = len(data)
 
         context = {
@@ -268,15 +428,20 @@ def process_message(service, pipeline, message_id, dry_run=False, reserved=None)
             dest_path = unique_path(dest_folder / filename, reserved=reserved or set())
             if reserved is not None:
                 reserved.add(dest_path)
+            # Size here is the encrypted size straight from the Gmail metadata;
+            # a real run rewrites the file, so the saved size will differ.
+            note = ", would remove password" if passwords else ""
             logging.info(
-                f"  {prefix}[{pipeline['name']}] would save: {dest_path} ({size} bytes)"
+                f"  {prefix}[{pipeline['name']}] would save: {dest_path} "
+                f"({size} bytes{note})"
             )
             continue
 
         dest_folder.mkdir(parents=True, exist_ok=True)
         dest_path = unique_path(dest_folder / filename)
         dest_path.write_bytes(data)
-        logging.info(f"  [{pipeline['name']}] saved: {dest_path} ({size} bytes)")
+        note = f", {pdf_status}" if pdf_status else ""
+        logging.info(f"  [{pipeline['name']}] saved: {dest_path} ({size} bytes{note})")
 
 
 def run_pipeline(service, pipeline, dry_run=False):
