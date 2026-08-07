@@ -1,0 +1,13 @@
+# Project runtime setup
+.claude/
+venv/
+
+# Logs and intermediate files
+*.log
+state/
+
+# PII and sensitive data
+config.yaml
+credentials.json
+token.json
+Statements/

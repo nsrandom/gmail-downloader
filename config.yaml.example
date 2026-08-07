@@ -1,0 +1,14 @@
+# Each entry under `pipelines` is one independent job.
+# Add as many as you like -- the runner loops over all of them.
+#
+# Fields:
+#   name:               unique identifier (used for the state file, and with --pipeline)
+#   query:               Gmail search syntax -- test it in the Gmail search bar first
+#   dest_folder:         destination directory; supports {year} {month} {day} {sender} {subject}
+#   filename_template:   destination filename; same template variables, plus {orig_filename}
+
+pipelines:
+  - name: electric_bill
+    query: 'from:ebill@your-electric-company.com has:attachment filename:pdf'
+    dest_folder: "~/Statements/Utilities/Electric/{year}"
+    filename_template: "{year}-{month}-{day}_electric_bill.pdf"
