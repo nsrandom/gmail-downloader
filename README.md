@@ -18,7 +18,7 @@ that only scans new mail.
      publish the app since this is just for your own account.
    - Application type: **Desktop app**.
 4. Download the resulting JSON file, rename it `credentials.json`, and
-   place it in this folder (next to `gmail_pipeline.py`).
+   place it in this folder (next to `attachments_downloader.py`).
 
 `credentials.json` and the `token.json` it later generates both contain
 sensitive access to your mailbox -- don't commit them to a public repo.
@@ -130,7 +130,7 @@ no cracking involved.
 ## 4. First run (interactive)
 
 ```bash
-python gmail_pipeline.py
+python attachments_downloader.py
 ```
 
 This opens a browser window for you to sign in and grant read-only Gmail
@@ -151,7 +151,7 @@ crontab -e
 Add a line to run it daily, e.g. at 7am:
 
 ```
-0 7 * * * cd /path/to/gmail_pdf_pipeline && /path/to/venv/bin/python gmail_pipeline.py >> cron.log 2>&1
+0 7 * * * cd /path/to/gmail_pdf_pipeline && /path/to/venv/bin/python attachments_downloader.py >> cron.log 2>&1
 ```
 
 On macOS, cron jobs can be skipped if your machine is asleep at the
@@ -173,19 +173,19 @@ To force a full rescan for a pipeline, delete its state file.
 ## Running a single pipeline
 
 ```bash
-python gmail_pipeline.py --pipeline bank_statements
+python attachments_downloader.py --pipeline bank_statements
 ```
 
 ## Previewing without downloading
 
 ```bash
-python gmail_pipeline.py --dry-run
+python attachments_downloader.py --dry-run
 ```
 
 Reports the destination path each matched message would be written to,
 without fetching attachments, writing files, or updating state -- so the
 next real run still sees exactly the same messages as new. Run
-`python gmail_pipeline.py --help` for the full flag and config reference.
+`python attachments_downloader.py --help` for the full flag and config reference.
 
 ## Logs
 

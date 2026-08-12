@@ -28,7 +28,7 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 
-from gmail_pipeline import (
+from attachments_downloader import (
     DEFAULT_CONFIG_PATH,
     decrypt_pdf,
     load_config,

@@ -11,10 +11,10 @@ Runs one or more configured "pipelines" that:
      first run.
 
 Usage:
-    python gmail_pipeline.py                  # run all pipelines in config.yaml
-    python gmail_pipeline.py --pipeline NAME   # run just one pipeline
-    python gmail_pipeline.py --config other.yaml
-    python gmail_pipeline.py --dry-run         # report what would be saved
+    python attachments_downloader.py                  # run all pipelines in config.yaml
+    python attachments_downloader.py --pipeline NAME   # run just one pipeline
+    python attachments_downloader.py --config other.yaml
+    python attachments_downloader.py --dry-run         # report what would be saved
 """
 
 import argparse
@@ -63,10 +63,10 @@ MAX_STORED_IDS = 5000
 
 EPILOG = """\
 examples:
-  gmail_pipeline.py                          run every pipeline in config.yaml
-  gmail_pipeline.py --pipeline electric_bill run one pipeline by name
-  gmail_pipeline.py --dry-run                preview without downloading
-  gmail_pipeline.py --config other.yaml      use a different config file
+  attachments_downloader.py                          run every pipeline in config.yaml
+  attachments_downloader.py --pipeline electric_bill run one pipeline by name
+  attachments_downloader.py --dry-run                preview without downloading
+  attachments_downloader.py --config other.yaml      use a different config file
 
 config file:
   Each entry under `pipelines:` needs name, query, dest_folder and
