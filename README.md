@@ -158,6 +158,33 @@ On macOS, cron jobs can be skipped if your machine is asleep at the
 scheduled time -- a `launchd` job (with `RunAtLoad` / catch-up behavior) is
 more reliable if that matters to you.
 
+## When authorization expires
+
+If a run stops with **"Gmail authorization has expired"**, the login cached in
+`token.json` is no longer accepted by Google. Sign in again:
+
+```bash
+python attachments_downloader.py --reauth
+```
+
+That ignores the saved token, opens a browser once, and writes a fresh
+`token.json` — after which unattended runs work again without a browser. The
+run prints these instructions itself, including the exact command for your
+interpreter, so there's nothing to look up when it happens.
+
+The usual cause is the OAuth consent screen still being in **Testing** mode:
+Google expires refresh tokens for test-mode apps after **7 days**, so a cron
+job dies about weekly. To stop that, go to Google Cloud Console → APIs &
+Services → OAuth consent screen → **Publish app**. The app stays private to
+your own account; publishing only lifts the test-mode expiry. Access being
+revoked at https://myaccount.google.com/permissions, a password change, or
+~6 months of disuse will also expire the token.
+
+`--reauth` needs a terminal and a browser. If it's run where neither exists
+(cron, launchd), it says so and exits non-zero rather than hanging while it
+waits for a sign-in nobody can complete — so run it by hand once, and let the
+scheduled job pick up the new token on its next run.
+
 ## How incremental scanning works
 
 Each pipeline has its own state file under `state/<pipeline_name>.json`,

@@ -15,6 +15,7 @@ Usage:
     python attachments_downloader.py --pipeline NAME   # run just one pipeline
     python attachments_downloader.py --config other.yaml
     python attachments_downloader.py --dry-run         # report what would be saved
+    python attachments_downloader.py --reauth          # sign in again, replacing token.json
 """
 
 import argparse
@@ -29,6 +30,7 @@ from io import BytesIO
 from pathlib import Path
 
 import yaml
+from google.auth.exceptions import GoogleAuthError, RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -67,6 +69,14 @@ examples:
   attachments_downloader.py --pipeline electric_bill run one pipeline by name
   attachments_downloader.py --dry-run                preview without downloading
   attachments_downloader.py --config other.yaml      use a different config file
+  attachments_downloader.py --reauth                 sign in again after a token expires
+
+authorization:
+  The first run opens a browser and caches the login in token.json, which
+  later runs (cron included) reuse. If Google stops accepting it -- most
+  often because the OAuth consent screen is still in "Testing" mode, where
+  refresh tokens expire after 7 days -- the run stops and prints how to
+  recover; `--reauth` is that recovery.
 
 config file:
   Each entry under `pipelines:` needs name, query, dest_folder and
@@ -101,33 +111,185 @@ def setup_logging():
     )
 
 
-def get_gmail_service():
+class AuthError(Exception):
+    """A Gmail authorization problem, carrying user-facing instructions.
+
+    Raised in place of google-auth's own exceptions. Theirs are accurate
+    ("invalid_grant: Token has been expired or revoked") but say nothing
+    about what to do next, and they arrive as a traceback that buries the
+    one line that matters. The message on this exception is meant to be
+    printed as-is -- no traceback -- and to end with the exact command to
+    run.
+    """
+
+
+def _boxed(title, body):
+    rule = "-" * 74
+    return "\n".join(["", rule, title, rule, body.rstrip(), rule])
+
+
+def reauth_command():
+    """The exact command line that re-runs the interactive sign-in.
+
+    Uses sys.executable so the suggestion stays correct inside a virtualenv,
+    where a bare `python` may be a different interpreter without the
+    dependencies installed.
+    """
+    return f"{sys.executable or 'python'} {Path(__file__).name} --reauth"
+
+
+def _google_reason(err):
+    """Pull the readable string out of a google-auth exception."""
+    args = getattr(err, "args", ())
+    if args and isinstance(args[0], str):
+        return args[0]
+    return str(err)
+
+
+def token_expired_message(err):
+    return _boxed(
+        "Gmail authorization has expired",
+        f"""\
+Google rejected the saved login in {TOKEN_PATH.name}:
+
+    {_google_reason(err)}
+
+The refresh token can no longer be exchanged for access. The usual causes:
+
+  * The OAuth consent screen is still in "Testing" mode -- Google expires
+    those refresh tokens after 7 days. This is by far the most common one.
+  * Access was revoked at https://myaccount.google.com/permissions
+  * The account password changed, or the token went ~6 months unused.
+
+To fix it, sign in again from a terminal on this machine (a browser window
+will open, and the new token is saved for future runs including cron):
+
+    cd {BASE_DIR}
+    {reauth_command()}
+
+To stop this from recurring every 7 days, publish the app: Google Cloud
+Console -> APIs & Services -> OAuth consent screen -> Publish app. It stays
+private to your own account; publishing only lifts the test-mode expiry.""",
+    )
+
+
+def _unreadable_token_message(err):
+    return _boxed(
+        "Saved Gmail login could not be read",
+        f"""\
+{TOKEN_PATH} exists but is not a usable token file:
+
+    {err}
+
+It was probably truncated or edited by hand. Delete it and sign in again:
+
+    rm {TOKEN_PATH}
+    cd {BASE_DIR}
+    {reauth_command()}""",
+    )
+
+
+def _missing_credentials_message():
+    return _boxed(
+        "Missing OAuth client file",
+        f"""\
+Signing in needs {CREDENTIALS_PATH.name}, which is not at:
+
+    {CREDENTIALS_PATH}
+
+Download an OAuth client ID of type "Desktop app" from Google Cloud Console
+(APIs & Services -> Credentials), rename the downloaded JSON file to
+{CREDENTIALS_PATH.name}, and save it at that path. README.md section 1 has
+the full walkthrough.""",
+    )
+
+
+def _non_interactive_message(why):
+    return _boxed(
+        "Gmail sign-in is needed, but this run cannot open a browser",
+        f"""\
+{why}
+
+Signing in requires a browser and a terminal you can interact with, so an
+unattended run (cron, launchd, a script with no terminal) cannot do it.
+
+Run this once yourself, in a terminal on this machine:
+
+    cd {BASE_DIR}
+    {reauth_command()}
+
+The refreshed token is written to {TOKEN_PATH.name}, and the unattended runs
+will pick it up on their own from then on.""",
+    )
+
+
+def get_gmail_service(force_reauth=False):
     """Authenticate and return a Gmail API service object.
 
     Uses a cached token (token.json) if available and valid. Otherwise runs
     an interactive OAuth consent flow once, using credentials.json (the
     OAuth client file downloaded from Google Cloud Console), and caches the
     resulting token for future runs -- including unattended cron runs.
+
+    Every failure path here raises AuthError with instructions attached.
     """
     creds = None
-    if TOKEN_PATH.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+    if TOKEN_PATH.exists() and not force_reauth:
+        try:
+            creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+        except (ValueError, json.JSONDecodeError) as e:
+            raise AuthError(_unreadable_token_message(e)) from e
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            logging.info("Access token expired; refreshing it.")
+            try:
+                creds.refresh(Request())
+            except RefreshError as e:
+                raise AuthError(token_expired_message(e)) from e
         else:
-            if not CREDENTIALS_PATH.exists():
-                raise FileNotFoundError(
-                    f"Missing {CREDENTIALS_PATH}. Download an OAuth client ID "
-                    "(Desktop app type) from Google Cloud Console and save it "
-                    "at this path. See README.md for the full setup steps."
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
-            creds = flow.run_local_server(port=0)
+            creds = run_consent_flow(force_reauth)
         TOKEN_PATH.write_text(creds.to_json())
 
     return build("gmail", "v1", credentials=creds)
+
+
+def run_consent_flow(force_reauth=False):
+    """Run the interactive browser sign-in and return fresh credentials."""
+    if not CREDENTIALS_PATH.exists():
+        raise AuthError(_missing_credentials_message())
+
+    if not sys.stdin.isatty():
+        why = (
+            "Re-authorization was requested with --reauth."
+            if force_reauth
+            else f"There is no saved login in {TOKEN_PATH.name} that can be refreshed."
+        )
+        raise AuthError(_non_interactive_message(why))
+
+    logging.info("Opening a browser to authorize read-only Gmail access...")
+    flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
+    try:
+        creds = flow.run_local_server(port=0)
+    except GoogleAuthError as e:
+        raise AuthError(
+            _boxed(
+                "Gmail sign-in did not complete",
+                f"""\
+The browser sign-in failed:
+
+    {_google_reason(e)}
+
+If the consent screen showed an "access blocked" or "app not verified"
+error, check that your Google account is listed as a test user under
+APIs & Services -> OAuth consent screen. Then try again:
+
+    cd {BASE_DIR}
+    {reauth_command()}""",
+            )
+        ) from e
+    logging.info(f"Authorized. Token saved to {TOKEN_PATH}.")
+    return creds
 
 
 # Keys holding literal passwords, and keys naming environment variables that
@@ -469,6 +631,10 @@ def run_pipeline(service, pipeline, dry_run=False):
             processed.add(message_id)
         except HttpError as e:
             logging.error(f"  [{name}] Gmail API error on message {message_id}: {e}")
+        except RefreshError:
+            # Authorization died mid-run; every remaining message would fail
+            # the same way, so let main() report it once and stop.
+            raise
         except Exception:
             logging.exception(f"  [{name}] Unexpected error on message {message_id}")
 
@@ -501,6 +667,12 @@ def main():
         help="Report what would be downloaded without writing any files or "
         "updating pipeline state. Attachments are never fetched.",
     )
+    parser.add_argument(
+        "--reauth",
+        action="store_true",
+        help="Ignore the saved token and sign in again, replacing token.json. "
+        "Needs a browser, so run it from a terminal (not from cron).",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -515,9 +687,21 @@ def main():
     if args.dry_run:
         logging.info("[dry-run] No files will be written and no state will be updated.")
 
-    service = get_gmail_service()
-    for pipeline in pipelines:
-        run_pipeline(service, pipeline, dry_run=args.dry_run)
+    try:
+        service = get_gmail_service(force_reauth=args.reauth)
+        for pipeline in pipelines:
+            run_pipeline(service, pipeline, dry_run=args.dry_run)
+    except AuthError as e:
+        # Already a finished, instructional message -- print it as-is rather
+        # than letting a traceback bury it.
+        logging.error(str(e))
+        sys.exit(1)
+    except RefreshError as e:
+        # A token that looked valid at startup (no recorded expiry, say) can
+        # still fail when the client refreshes it mid-run, on the first API
+        # call. Same cause, so the same instructions apply.
+        logging.error(token_expired_message(e))
+        sys.exit(1)
 
 
 if __name__ == "__main__":
