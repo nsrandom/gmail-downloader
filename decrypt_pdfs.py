@@ -14,9 +14,9 @@ that pipeline's configured passwords. Files that are already readable are
 left untouched, and a file that cannot be unlocked is never modified.
 
 Usage:
-    python decrypt.py                    # every pipeline in the config
-    python decrypt.py --dry-run          # report only, change nothing
-    python decrypt.py --pipeline NAME    # just one pipeline
+    python decrypt_pdfs.py                    # every pipeline in the config
+    python decrypt_pdfs.py --dry-run          # report only, change nothing
+    python decrypt_pdfs.py --pipeline NAME    # just one pipeline
 """
 
 import argparse
@@ -195,9 +195,9 @@ Use this after adding a password to a pipeline that has already run --
 the downloader itself will not revisit messages it has already processed.
 
 examples:
-  decrypt.py --dry-run              see what would change, change nothing
-  decrypt.py                        decrypt everything it can
-  decrypt.py --pipeline bank_statements
+  decrypt_pdfs.py --dry-run         see what would change, change nothing
+  decrypt_pdfs.py                   decrypt everything it can
+  decrypt_pdfs.py --pipeline bank_statements
 """,
     )
     parser.add_argument(

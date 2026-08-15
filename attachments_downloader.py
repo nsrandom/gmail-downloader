@@ -15,7 +15,7 @@ Usage:
     python attachments_downloader.py --pipeline NAME   # run just one pipeline
     python attachments_downloader.py --config configs/other.yaml
     python attachments_downloader.py --dry-run         # report what would be saved
-    python attachments_downloader.py --reauth          # sign in again, replacing token.json
+    python attachments_downloader.py --reauth          # sign in again, replacing state/token.json
 """
 
 import argparse
@@ -50,10 +50,18 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_DIR = BASE_DIR / "configs"
 DEFAULT_CONFIG_PATH = CONFIG_DIR / "attachments_config.yaml"
-TOKEN_PATH = BASE_DIR / "token.json"
-CREDENTIALS_PATH = BASE_DIR / "credentials.json"
+# Everything the runner generates or needs at runtime -- the OAuth client
+# file, the cached login, the log, and per-pipeline state -- lives here, so
+# the project root holds only code and config. The whole directory is
+# gitignored; it is the one place with secrets in it.
 STATE_DIR = BASE_DIR / "state"
-LOG_PATH = BASE_DIR / "pipeline.log"
+TOKEN_PATH = STATE_DIR / "token.json"
+CREDENTIALS_PATH = STATE_DIR / "credentials.json"
+LOG_PATH = STATE_DIR / "pipeline.log"
+
+# Pipeline names whose state file (state/<name>.json) would land on one of
+# the files above.
+RESERVED_PIPELINE_NAMES = {"token", "credentials"}
 
 # Re-scan this many days before the last run on every run. This is a safety
 # buffer -- it protects against timezone quirks and mail that was delayed in
@@ -73,8 +81,9 @@ examples:
   attachments_downloader.py --reauth                 sign in again after a token expires
 
 authorization:
-  The first run opens a browser and caches the login in token.json, which
-  later runs (cron included) reuse. If Google stops accepting it -- most
+  Needs state/credentials.json (the OAuth client file from Google Cloud
+  Console). The first run opens a browser and caches the login in
+  state/token.json, which later runs (cron included) reuse. If Google stops accepting it -- most
   often because the OAuth consent screen is still in "Testing" mode, where
   refresh tokens expire after 7 days -- the run stops and prints how to
   recover; `--reauth` is that recovery.
@@ -97,13 +106,15 @@ template variables:
   {subject}; filename_template additionally accepts {orig_filename}.
 
 state:
-  Processed message IDs are stored per pipeline under state/, so re-runs
-  only look at new mail. Delete a pipeline's state file to re-scan from
+  state/ holds everything this runner generates: processed message IDs per
+  pipeline (state/<name>.json), the cached login, and pipeline.log. Re-runs
+  only look at new mail; delete a pipeline's state file to re-scan from
   scratch. --dry-run never touches these files.
 """
 
 
 def setup_logging():
+    STATE_DIR.mkdir(exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -229,10 +240,10 @@ will pick it up on their own from then on.""",
 def get_gmail_service(force_reauth=False):
     """Authenticate and return a Gmail API service object.
 
-    Uses a cached token (token.json) if available and valid. Otherwise runs
-    an interactive OAuth consent flow once, using credentials.json (the
-    OAuth client file downloaded from Google Cloud Console), and caches the
-    resulting token for future runs -- including unattended cron runs.
+    Uses a cached token (state/token.json) if available and valid. Otherwise
+    runs an interactive OAuth consent flow once, using state/credentials.json
+    (the OAuth client file downloaded from Google Cloud Console), and caches
+    the resulting token for future runs -- including unattended cron runs.
 
     Every failure path here raises AuthError with instructions attached.
     """
@@ -252,6 +263,7 @@ def get_gmail_service(force_reauth=False):
                 raise AuthError(token_expired_message(e)) from e
         else:
             creds = run_consent_flow(force_reauth)
+        STATE_DIR.mkdir(exist_ok=True)
         TOKEN_PATH.write_text(creds.to_json())
 
     return build("gmail", "v1", credentials=creds)
@@ -329,6 +341,15 @@ def load_config(path):
         for required in ("name", "query", "dest_folder", "filename_template"):
             if required not in p:
                 raise ValueError(f"Pipeline config missing required key '{required}': {p}")
+
+        # A pipeline's state file is state/<name>.json, which shares the
+        # directory with token.json and credentials.json -- so these two names
+        # would have the state writer overwrite the login files.
+        if p["name"] in RESERVED_PIPELINE_NAMES:
+            raise ValueError(
+                f"Pipeline name '{p['name']}' is reserved: its state file would "
+                f"overwrite {STATE_DIR / (p['name'] + '.json')}. Rename the pipeline."
+            )
 
         # Overlay password fields from the raw-string parse (same file, so the
         # entries line up by position).
@@ -673,7 +694,7 @@ def main():
     parser.add_argument(
         "--reauth",
         action="store_true",
-        help="Ignore the saved token and sign in again, replacing token.json. "
+        help="Ignore the saved token and sign in again, replacing state/token.json. "
         "Needs a browser, so run it from a terminal (not from cron).",
     )
     args = parser.parse_args()

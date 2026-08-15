@@ -3,7 +3,8 @@
 venv/
 .venv/
 
-# Logs and intermediate files
+# Runtime files: state/ holds per-pipeline state, the log, and the OAuth
+# credentials/token -- all of it generated or secret, none of it committed.
 *.log
 state/
 __pycache__/
@@ -11,6 +12,8 @@ __pycache__/
 # PII and sensitive data
 # Real configs live in configs/*.yaml; the *.yaml.example templates are tracked.
 configs/*.yaml
+# Belt-and-braces: these live in state/ (already ignored), but a stray copy
+# anywhere in the tree must never be committed either.
 credentials.json
 token.json
 Statements/

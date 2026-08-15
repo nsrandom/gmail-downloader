@@ -18,10 +18,15 @@ that only scans new mail.
      publish the app since this is just for your own account.
    - Application type: **Desktop app**.
 4. Download the resulting JSON file, rename it `credentials.json`, and
-   place it in this folder (next to `attachments_downloader.py`).
+   place it in the `state/` folder (create it if it isn't there yet):
 
-`credentials.json` and the `token.json` it later generates both contain
-sensitive access to your mailbox -- don't commit them to a public repo.
+```bash
+mkdir -p state && mv ~/Downloads/client_secret_*.json state/credentials.json
+```
+
+`state/credentials.json` and the `state/token.json` it later generates both
+contain sensitive access to your mailbox. The whole `state/` folder is
+gitignored for that reason -- don't commit it to a public repo.
 
 ## 2. Install dependencies
 
@@ -116,13 +121,13 @@ Adding a password only affects future downloads. Files already on disk stay
 encrypted, and the downloader won't revisit them -- their message IDs are in
 the pipeline state, so they count as done.
 
-`decrypt.py` fixes those in place. It walks each pipeline's `dest_folder`,
+`decrypt_pdfs.py` fixes those in place. It walks each pipeline's `dest_folder`,
 and rewrites every encrypted PDF it can open with that pipeline's passwords:
 
 ```bash
-python decrypt.py --dry-run     # report only, change nothing
-python decrypt.py               # decrypt everything it can
-python decrypt.py --pipeline bank_statements
+python decrypt_pdfs.py --dry-run     # report only, change nothing
+python decrypt_pdfs.py               # decrypt everything it can
+python decrypt_pdfs.py --pipeline bank_statements
 ```
 
 Files that already open are left untouched, and a file no password unlocks is
@@ -145,7 +150,7 @@ python attachments_downloader.py
 ```
 
 This opens a browser window for you to sign in and grant read-only Gmail
-access. It caches the resulting token in `token.json`, so future runs --
+access. It caches the resulting token in `state/token.json`, so future runs --
 including unattended cron runs -- don't need a browser.
 
 The first run will scan your entire mailbox history for each pipeline's
@@ -162,7 +167,7 @@ crontab -e
 Add a line to run it daily, e.g. at 7am:
 
 ```
-0 7 * * * cd /path/to/gmail_pdf_pipeline && /path/to/venv/bin/python attachments_downloader.py >> cron.log 2>&1
+0 7 * * * cd /path/to/gmail_pdf_pipeline && /path/to/venv/bin/python attachments_downloader.py >> state/cron.log 2>&1
 ```
 
 On macOS, cron jobs can be skipped if your machine is asleep at the
@@ -172,14 +177,14 @@ more reliable if that matters to you.
 ## When authorization expires
 
 If a run stops with **"Gmail authorization has expired"**, the login cached in
-`token.json` is no longer accepted by Google. Sign in again:
+`state/token.json` is no longer accepted by Google. Sign in again:
 
 ```bash
 python attachments_downloader.py --reauth
 ```
 
 That ignores the saved token, opens a browser once, and writes a fresh
-`token.json` — after which unattended runs work again without a browser. The
+`state/token.json` — after which unattended runs work again without a browser. The
 run prints these instructions itself, including the exact command for your
 interpreter, so there's nothing to look up when it happens.
 
@@ -198,7 +203,9 @@ scheduled job pick up the new token on its next run.
 
 ## How incremental scanning works
 
-Each pipeline has its own state file under `state/<pipeline_name>.json`,
+`state/` holds everything the runner generates or needs at runtime: the
+OAuth `credentials.json` and `token.json`, `pipeline.log`, and one state file
+per pipeline. Each pipeline's state lives in `state/<pipeline_name>.json`,
 storing:
 
 - `last_run_date` -- appended to the query as `after:` (with a 1-day
@@ -206,7 +213,9 @@ storing:
 - `processed_message_ids` -- so even within that overlap window, messages
   already handled are skipped rather than re-saved.
 
-To force a full rescan for a pipeline, delete its state file.
+To force a full rescan for a pipeline, delete its state file. (Because state
+files are named after the pipeline, `token` and `credentials` are rejected as
+pipeline names -- their state files would land on the login files.)
 
 ## Running a single pipeline
 
@@ -227,5 +236,5 @@ next real run still sees exactly the same messages as new. Run
 
 ## Logs
 
-Every run appends to `pipeline.log` in this folder, in addition to
-printing to stdout.
+Every run appends to `state/pipeline.log`, in addition to printing to
+stdout.
