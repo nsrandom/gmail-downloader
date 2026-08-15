@@ -1,6 +1,7 @@
 # Project runtime setup
 .claude/
 venv/
+.venv/
 
 # Logs and intermediate files
 *.log
@@ -8,7 +9,8 @@ state/
 __pycache__/
 
 # PII and sensitive data
-config.yaml
+# Real configs live in configs/*.yaml; the *.yaml.example templates are tracked.
+configs/*.yaml
 credentials.json
 token.json
 Statements/

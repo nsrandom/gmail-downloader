@@ -33,7 +33,18 @@ pip install -r requirements.txt
 
 ## 3. Configure your pipelines
 
-Edit `config.yaml`. Each pipeline needs:
+Config files live in `configs/`. The attachment downloader reads
+`configs/attachments_config.yaml` by default — start from the tracked template:
+
+```bash
+cp configs/attachments_config.yaml.example configs/attachments_config.yaml
+```
+
+Real configs (`configs/*.yaml`) are gitignored since they tend to hold account
+details and passwords; only the `*.yaml.example` templates are committed. Point
+either script at a different file with `--config`.
+
+Each pipeline needs:
 
 - `query` -- Gmail search syntax. Test it in the Gmail search bar first to
   confirm it matches what you expect.
@@ -62,7 +73,7 @@ export BANK_PDF_PASSWORD='...'          # in ~/.zshrc, or the cron entry
 ```
 
 A literal `passwords: ["..."]` field also works if you'd rather not bother,
-but it leaves the password in plaintext in `config.yaml`.
+but it leaves the password in plaintext in the config file.
 
 ### When the password changed over time
 

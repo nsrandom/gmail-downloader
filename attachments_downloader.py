@@ -11,9 +11,9 @@ Runs one or more configured "pipelines" that:
      first run.
 
 Usage:
-    python attachments_downloader.py                  # run all pipelines in config.yaml
+    python attachments_downloader.py                  # run all pipelines in the config
     python attachments_downloader.py --pipeline NAME   # run just one pipeline
-    python attachments_downloader.py --config other.yaml
+    python attachments_downloader.py --config configs/other.yaml
     python attachments_downloader.py --dry-run         # report what would be saved
     python attachments_downloader.py --reauth          # sign in again, replacing token.json
 """
@@ -48,7 +48,8 @@ except ImportError:  # only needed by pipelines that configure a password
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
 BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_CONFIG_PATH = BASE_DIR / "config.yaml"
+CONFIG_DIR = BASE_DIR / "configs"
+DEFAULT_CONFIG_PATH = CONFIG_DIR / "attachments_config.yaml"
 TOKEN_PATH = BASE_DIR / "token.json"
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 STATE_DIR = BASE_DIR / "state"
@@ -65,10 +66,10 @@ MAX_STORED_IDS = 5000
 
 EPILOG = """\
 examples:
-  attachments_downloader.py                          run every pipeline in config.yaml
+  attachments_downloader.py                          run every pipeline in the config
   attachments_downloader.py --pipeline electric_bill run one pipeline by name
   attachments_downloader.py --dry-run                preview without downloading
-  attachments_downloader.py --config other.yaml      use a different config file
+  attachments_downloader.py --config configs/x.yaml  use a different config file
   attachments_downloader.py --reauth                 sign in again after a token expires
 
 authorization:
@@ -79,7 +80,9 @@ authorization:
   recover; `--reauth` is that recovery.
 
 config file:
-  Each entry under `pipelines:` needs name, query, dest_folder and
+  Config files live in configs/; this runner defaults to
+  configs/attachments_config.yaml (copy configs/attachments_config.yaml.example
+  to start one). Each entry under `pipelines:` needs name, query, dest_folder and
   filename_template. `query` uses Gmail search syntax -- test it in the
   Gmail search bar first. A pipeline whose sender password-protects its
   PDFs may also set `passwords_env` (names of environment variables

@@ -14,7 +14,7 @@ that pipeline's configured passwords. Files that are already readable are
 left untouched, and a file that cannot be unlocked is never modified.
 
 Usage:
-    python decrypt.py                    # every pipeline in config.yaml
+    python decrypt.py                    # every pipeline in the config
     python decrypt.py --dry-run          # report only, change nothing
     python decrypt.py --pipeline NAME    # just one pipeline
 """
@@ -183,7 +183,7 @@ def report(tally, failures, dry_run):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Decrypt already-downloaded PDFs using the passwords in config.yaml.",
+        description="Decrypt already-downloaded PDFs using the passwords in the config.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Walks each pipeline's dest_folder and rewrites encrypted PDFs in place,
