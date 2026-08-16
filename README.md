@@ -1,240 +1,78 @@
-# Gmail PDF Pipeline
+# Gmail Downloader
 
-Scans Gmail for messages matching a filter, downloads their PDF attachments,
-and saves them into a structured folder. Designed to run daily via cron:
-the first run scans everything matching the filter, and every run after
-that only scans new mail.
+Turns a Gmail search into a tidy folder of files on disk.
 
-## 1. One-time Google Cloud setup
+You describe a *pipeline* -- a Gmail query, a destination folder, a filename
+pattern -- and the runner finds the matching mail, downloads the PDF
+attachments, and files them where you said. Point it at your bank, your
+utility company, and your building's maintenance invoices, and the statements
+land in a consistent tree instead of a mailbox.
 
-1. Go to https://console.cloud.google.com/ and create a project (or use an
-   existing one).
-2. Enable the **Gmail API** for that project (APIs & Services -> Library ->
-   search "Gmail API" -> Enable).
-3. Go to APIs & Services -> Credentials -> Create Credentials -> OAuth
-   client ID.
-   - If prompted, configure the OAuth consent screen first. Choose
-     "External" and add yourself as a test user -- you don't need to
-     publish the app since this is just for your own account.
-   - Application type: **Desktop app**.
-4. Download the resulting JSON file, rename it `credentials.json`, and
-   place it in the `state/` folder (create it if it isn't there yet):
+It's built to run unattended: the first run sweeps your whole mailbox history,
+and every run after that only looks at mail that arrived since, so a daily cron
+job stays cheap.
 
-```bash
-mkdir -p state && mv ~/Downloads/client_secret_*.json state/credentials.json
+```yaml
+pipelines:
+  - name: electric_bill
+    query: 'from:ebill@your-electric-company.com has:attachment filename:pdf'
+    dest_folder: "~/Statements/Utilities/Electric/{year}"
+    filename_template: "{year}-{month}-{day}_electric_bill.pdf"
 ```
 
-`state/credentials.json` and the `state/token.json` it later generates both
-contain sensitive access to your mailbox. The whole `state/` folder is
-gitignored for that reason -- don't commit it to a public repo.
+```
+~/Statements/Utilities/Electric/2026/2026-08-03_electric_bill.pdf
+```
 
-## 2. Install dependencies
+## What it can do
+
+- **Many pipelines, one run.** Each has its own query, destination, naming
+  scheme and state; they don't interfere with each other.
+- **Templated paths and names** -- `{year}`, `{month}`, `{day}`, `{sender}`,
+  `{subject}`, `{orig_filename}` -- driven by the message's own date, so late
+  mail still files under the date it belongs to.
+- **Unlocks password-protected PDFs** as it saves, so the archive is readable
+  without remembering which bank used which password. Several passwords can be
+  listed per pipeline, for senders that rotated theirs over time.
+- **Incremental and idempotent.** Processed message IDs are remembered, so
+  re-runs never re-download or duplicate; existing files are never overwritten.
+- **Dry-run mode** that shows exactly where each match would land without
+  fetching, writing, or advancing state.
+- **Read-only Gmail access.** The OAuth scope granted can't send, delete, or
+  modify mail.
+- **Repairs old archives.** A separate script decrypts PDFs that were saved
+  before you knew their password.
+
+## Getting started
 
 ```bash
 pip install -r requirements.txt
-```
-
-(Consider a virtualenv: `python -m venv venv && source venv/bin/activate`.)
-
-## 3. Configure your pipelines
-
-Config files live in `configs/`. The attachment downloader reads
-`configs/attachments_config.yaml` by default — start from the tracked template:
-
-```bash
 cp configs/attachments_config.yaml.example configs/attachments_config.yaml
-```
-
-Real configs (`configs/*.yaml`) are gitignored since they tend to hold account
-details and passwords; only the `*.yaml.example` templates are committed. Point
-either script at a different file with `--config`.
-
-Each pipeline needs:
-
-- `query` -- Gmail search syntax. Test it in the Gmail search bar first to
-  confirm it matches what you expect.
-- `dest_folder` / `filename_template` -- support `{year}`, `{month}`,
-  `{day}`, `{sender}`, `{subject}`, and (filename only) `{orig_filename}`.
-
-### Password-protected PDFs
-
-Some senders (banks especially) encrypt their statement PDFs. A pipeline can
-optionally carry the password, in which case the PDF is unlocked and the
-**saved copy is written with no password at all** -- so the archive stays
-readable without having to remember which password went with which sender.
-
-Prefer keeping the password out of the config file:
-
-```yaml
-  - name: bank_statements
-    query: '...'
-    dest_folder: "..."
-    filename_template: "..."
-    passwords_env: BANK_PDF_PASSWORD    # name of an env var
-```
-
-```bash
-export BANK_PDF_PASSWORD='...'          # in ~/.zshrc, or the cron entry
-```
-
-A literal `passwords: ["..."]` field also works if you'd rather not bother,
-but it leaves the password in plaintext in the config file.
-
-### When the password changed over time
-
-Senders rotate their password scheme, which leaves older mail needing an
-older password. Every password key accepts a **list**, and each candidate is
-tried in order until one opens the file:
-
-```yaml
-    passwords:
-      - "current-one"
-      - "the-one-before-that"
-      - "the-original"
-```
-
-```yaml
-    passwords_env:                      # same, via env vars
-      - BANK_PDF_PASSWORD
-      - BANK_PDF_PASSWORD_OLD
-```
-
-Both spellings work for either form: `password`/`passwords` and
-`password_env`/`passwords_env` are interchangeable, and each takes a single
-value or a list. If you set several, env vars are tried before literals.
-When a file opens with something other than the first candidate, the log
-says which one worked.
-
-**Quote numeric passwords.** Unquoted, YAML reads `01234` as octal (`668`)
-and `yes` as `true`. The runner re-reads password fields as raw text so this
-can't silently corrupt them, but quoting is the habit to keep.
-
-If a PDF can't be unlocked -- none of the passwords match, or an encryption
-scheme pypdf doesn't support -- it is still saved in its original encrypted
-form and an `ERROR` line is written to the log. Nothing is ever dropped
-because decryption failed, so it's worth grepping the log for `ERROR` after
-enabling a password for the first time.
-
-### Fixing PDFs that were already saved encrypted
-
-Adding a password only affects future downloads. Files already on disk stay
-encrypted, and the downloader won't revisit them -- their message IDs are in
-the pipeline state, so they count as done.
-
-`decrypt_pdfs.py` fixes those in place. It walks each pipeline's `dest_folder`,
-and rewrites every encrypted PDF it can open with that pipeline's passwords:
-
-```bash
-python decrypt_pdfs.py --dry-run     # report only, change nothing
-python decrypt_pdfs.py               # decrypt everything it can
-python decrypt_pdfs.py --pipeline bank_statements
-```
-
-Files that already open are left untouched, and a file no password unlocks is
-never modified -- it's just listed at the end, grouped by cause. Rewrites are
-atomic (temp file plus rename) and preserve timestamps, so an interruption
-can't leave a half-written statement behind. It's safe to re-run, and exits
-non-zero if anything is still encrypted.
-
-Don't try to fix these by deleting the state file and re-downloading: the
-re-fetched copies land alongside the encrypted ones as `..._1.pdf` rather
-than replacing them.
-
-Note that this only applies to PDFs whose password you already know; there's
-no cracking involved.
-
-## 4. First run (interactive)
-
-```bash
-python attachments_downloader.py
-```
-
-This opens a browser window for you to sign in and grant read-only Gmail
-access. It caches the resulting token in `state/token.json`, so future runs --
-including unattended cron runs -- don't need a browser.
-
-The first run will scan your entire mailbox history for each pipeline's
-query, since there's no prior state yet. If a query is broad, this could
-take a little while and pull in a lot of matches -- consider narrowing the
-query (e.g. adding `after:2025/01/01`) for the first run if needed.
-
-## 5. Automate it with cron
-
-```bash
-crontab -e
-```
-
-Add a line to run it daily, e.g. at 7am:
-
-```
-0 7 * * * cd /path/to/gmail_pdf_pipeline && /path/to/venv/bin/python attachments_downloader.py >> state/cron.log 2>&1
-```
-
-On macOS, cron jobs can be skipped if your machine is asleep at the
-scheduled time -- a `launchd` job (with `RunAtLoad` / catch-up behavior) is
-more reliable if that matters to you.
-
-## When authorization expires
-
-If a run stops with **"Gmail authorization has expired"**, the login cached in
-`state/token.json` is no longer accepted by Google. Sign in again:
-
-```bash
-python attachments_downloader.py --reauth
-```
-
-That ignores the saved token, opens a browser once, and writes a fresh
-`state/token.json` — after which unattended runs work again without a browser. The
-run prints these instructions itself, including the exact command for your
-interpreter, so there's nothing to look up when it happens.
-
-The usual cause is the OAuth consent screen still being in **Testing** mode:
-Google expires refresh tokens for test-mode apps after **7 days**, so a cron
-job dies about weekly. To stop that, go to Google Cloud Console → APIs &
-Services → OAuth consent screen → **Publish app**. The app stays private to
-your own account; publishing only lifts the test-mode expiry. Access being
-revoked at https://myaccount.google.com/permissions, a password change, or
-~6 months of disuse will also expire the token.
-
-`--reauth` needs a terminal and a browser. If it's run where neither exists
-(cron, launchd), it says so and exits non-zero rather than hanging while it
-waits for a sign-in nobody can complete — so run it by hand once, and let the
-scheduled job pick up the new token on its next run.
-
-## How incremental scanning works
-
-`state/` holds everything the runner generates or needs at runtime: the
-OAuth `credentials.json` and `token.json`, `pipeline.log`, and one state file
-per pipeline. Each pipeline's state lives in `state/<pipeline_name>.json`,
-storing:
-
-- `last_run_date` -- appended to the query as `after:` (with a 1-day
-  overlap buffer) so each run only asks Gmail for recent mail.
-- `processed_message_ids` -- so even within that overlap window, messages
-  already handled are skipped rather than re-saved.
-
-To force a full rescan for a pipeline, delete its state file. (Because state
-files are named after the pipeline, `token` and `credentials` are rejected as
-pipeline names -- their state files would land on the login files.)
-
-## Running a single pipeline
-
-```bash
-python attachments_downloader.py --pipeline bank_statements
-```
-
-## Previewing without downloading
-
-```bash
+# edit the config, then:
 python attachments_downloader.py --dry-run
 ```
 
-Reports the destination path each matched message would be written to,
-without fetching attachments, writing files, or updating state -- so the
-next real run still sees exactly the same messages as new. Run
-`python attachments_downloader.py --help` for the full flag and config reference.
+That needs Google Cloud credentials first -- **[docs/setup.md](docs/setup.md)**
+walks through the whole thing, from enabling the Gmail API to scheduling the
+daily run.
 
-## Logs
+## Documentation
 
-Every run appends to `state/pipeline.log`, in addition to printing to
-stdout.
+| | |
+| --- | --- |
+| **[Setup](docs/setup.md)** | Google Cloud credentials, install, config, first run, cron, and what to do when authorization expires. |
+| **[attachments_downloader.py](docs/attachments_downloader.md)** | The downloader: flags, the full config reference, password handling, dry runs, and how incremental scanning works. |
+| **[decrypt_pdfs.py](docs/decrypt_pdfs.md)** | Decrypting PDFs that were already archived encrypted. |
+
+## Layout
+
+```
+attachments_downloader.py   the downloader
+decrypt_pdfs.py             in-place decryption for already-saved PDFs
+configs/                    pipeline configs (*.yaml gitignored, *.example tracked)
+docs/                       the documentation above
+state/                      credentials, token, log, and per-pipeline state
+```
+
+`state/` and your real configs are gitignored -- they hold OAuth credentials,
+account details, and PDF passwords. Keep it that way in any fork.
