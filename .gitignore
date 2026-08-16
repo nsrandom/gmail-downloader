@@ -9,7 +9,14 @@ venv/
 state/
 __pycache__/
 
+# Environment files
+.env
+.env.*
+!.env.example
+
 # PII and sensitive data
+# API tokens for the pipeline runner's http actions. .env.example carries the
+# key names with empty values and is tracked.
 # Real configs live in configs/*.yaml; the *.yaml.example templates are tracked.
 configs/*.yaml
 # Belt-and-braces: these live in state/ (already ignored), but a stray copy
@@ -17,3 +24,7 @@ configs/*.yaml
 credentials.json
 token.json
 Statements/
+
+# Extraction fixtures are real messages saved by --dump-body, so they carry
+# account numbers and addresses. Commit one only after --redact.
+tests/fixtures/
