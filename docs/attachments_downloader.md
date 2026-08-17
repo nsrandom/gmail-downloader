@@ -65,9 +65,9 @@ Sender and subject values are sanitized before they land in a path, and a
 destination that already exists gets `_1`, `_2`, ... appended rather than being
 overwritten.
 
-`token` and `credentials` are rejected as pipeline names: state files are named
-after the pipeline and live in `state/`, so those two would overwrite the login
-files.
+State files are named after the pipeline but live one level down, in
+`state/attachments/`, so a pipeline name can never collide with the login files
+in `state/` or with a pipeline of the same name in the extractor's config.
 
 ## Password-protected PDFs
 
@@ -145,7 +145,7 @@ password rewrites the file, so the saved size will differ.
 
 `state/` holds everything the runner generates or needs at runtime: the
 OAuth `credentials.json` and `token.json`, `pipeline.log`, and one state file
-per pipeline. Each pipeline's state lives in `state/<pipeline_name>.json`,
+per pipeline. Each pipeline's state lives in `state/attachments/<pipeline_name>.json`,
 storing:
 
 - `last_run_date` -- appended to the query as `after:` (with a 1-day

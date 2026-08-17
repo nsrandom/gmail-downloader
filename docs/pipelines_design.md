@@ -629,7 +629,7 @@ addresses and account numbers for anything worth committing.
 ## State and idempotency
 
 State lives at `state/pipelines/<name>.json`, a separate directory from the
-attachments runner's `state/<name>.json` so the two can share a pipeline name
+attachments runner's `state/attachments/<name>.json` so the two can share a pipeline name
 without colliding. The log is `state/pipelines.log`.
 
 ```json

@@ -59,9 +59,10 @@ TOKEN_PATH = STATE_DIR / "token.json"
 CREDENTIALS_PATH = STATE_DIR / "credentials.json"
 LOG_PATH = STATE_DIR / "pipeline.log"
 
-# Pipeline names whose state file (state/<name>.json) would land on one of
-# the files above.
-RESERVED_PIPELINE_NAMES = {"token", "credentials"}
+# Per-pipeline state sits one level down, so a pipeline name can never collide
+# with the login files above, and so a pipeline here and one in the pipelines
+# config can share a name without clobbering each other's state.
+ATTACHMENT_STATE_DIR = STATE_DIR / "attachments"
 
 # Re-scan this many days before the last run on every run. This is a safety
 # buffer -- it protects against timezone quirks and mail that was delayed in
@@ -107,7 +108,7 @@ template variables:
 
 state:
   state/ holds everything this runner generates: processed message IDs per
-  pipeline (state/<name>.json), the cached login, and pipeline.log. Re-runs
+  pipeline (state/attachments/<name>.json), the cached login, and pipeline.log. Re-runs
   only look at new mail; delete a pipeline's state file to re-scan from
   scratch. --dry-run never touches these files.
 """
@@ -342,15 +343,6 @@ def load_config(path):
             if required not in p:
                 raise ValueError(f"Pipeline config missing required key '{required}': {p}")
 
-        # A pipeline's state file is state/<name>.json, which shares the
-        # directory with token.json and credentials.json -- so these two names
-        # would have the state writer overwrite the login files.
-        if p["name"] in RESERVED_PIPELINE_NAMES:
-            raise ValueError(
-                f"Pipeline name '{p['name']}' is reserved: its state file would "
-                f"overwrite {STATE_DIR / (p['name'] + '.json')}. Rename the pipeline."
-            )
-
         # Overlay password fields from the raw-string parse (same file, so the
         # entries line up by position).
         raw = raw_pipelines[i] if i < len(raw_pipelines) else {}
@@ -411,7 +403,7 @@ def resolve_passwords(pipeline):
 
 
 def state_path_for(pipeline_name):
-    return STATE_DIR / f"{pipeline_name}.json"
+    return ATTACHMENT_STATE_DIR / f"{pipeline_name}.json"
 
 
 def load_state(pipeline_name):
@@ -422,7 +414,7 @@ def load_state(pipeline_name):
 
 
 def save_state(pipeline_name, state):
-    STATE_DIR.mkdir(exist_ok=True)
+    ATTACHMENT_STATE_DIR.mkdir(parents=True, exist_ok=True)
     path = state_path_for(pipeline_name)
     path.write_text(json.dumps(state, indent=2))
 
