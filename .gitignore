@@ -24,7 +24,7 @@ configs/*.yaml
 # anywhere in the tree must never be committed either.
 credentials.json
 token.json
-Statements/
+output/
 
 # Extraction fixtures are real messages saved by --dump-body, so they carry
 # account numbers and addresses. Nothing here redacts them, so keep them out;
