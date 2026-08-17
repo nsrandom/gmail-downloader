@@ -1,0 +1,183 @@
+# Each entry under `pipelines` matches some mail, extracts a record (one JSON
+# dictionary), and hands it to one or more actions.
+#
+# Copy this to pipelines_config.yaml and edit. Secrets go in .env, never here.
+#
+#   python pipelines_runner.py --explain --pipeline NAME --message-id ID
+#     -- prints what the extract steps produce, and runs no actions.
+
+version: 1
+
+defaults:
+  timezone: America/Los_Angeles   # reading email dates, placing calendar events
+  overlap_days: 1                 # re-scan this far back on every run
+  http_timeout: 20                # an http action's `timeout:` overrides it
+  on_missing_field: fail          # fail | skip | warn
+  max_attempts: 5                 # give up on a message after this many failed runs
+  retain_days: 90                 # how long a message stays in the state file
+
+# Connection-level settings, referenced by name from actions. Declare as many
+# as you like -- one pipeline can post to several unrelated services.
+targets:
+  finance_api:
+    type: http
+    base_url: https://api.example.com
+    headers:
+      Authorization: "Bearer ${FINANCE_API_TOKEN}"   # resolved from .env
+
+  personal_calendar:
+    type: google_calendar
+    calendar_id: primary
+
+pipelines:
+  # ---------------------------------------------------------------------
+  # A utility bill: extract the amount and due date, record them, and put a
+  # reminder on the calendar a few days before the money is due.
+  # ---------------------------------------------------------------------
+  - name: electric_bill
+    query: 'from:DoNotReply@billpay.pge.com subject:"Energy Statement is Ready"'
+
+    extract:
+      source: html
+      steps:
+        # PG&E labels both values with an *image*, so there is no text to
+        # anchor on -- only the structure and the image filename. soupsieve
+        # supports :has() and sibling combinators, which is what makes this
+        # work at all.
+        #
+        # `fallbacks` covers the layouts this sender used before. Old mail in
+        # the mailbox does not change when they redesign, so a pipeline more
+        # than a year old will usually need them. Each is tried in turn, and
+        # the log says when the value did not come from the primary.
+        - name: amount
+          using: css
+          selector: 'td:has(img[src*="amount-due"]) + td strong'
+          type: money
+          required: true
+          fallbacks:
+            - source: html_text
+              pattern: 'Statement balance:\s*\$\s*([\d,]+\.\d{2})'
+            - source: html_text
+              pattern: 'The amount of \$([\d,]+\.\d{2})'
+
+        - name: due_date
+          using: css
+          selector: 'td:has(img[src*="due-date"]) + td strong'
+          type: date
+          format: "%m/%d/%Y"
+          required: true
+          fallbacks:
+            - source: html_text
+              pattern: 'Payment due date:\s*(\d{2}/\d{2}/\d{4})'
+            - source: html_text
+              pattern: 'is due on (\d{2}/\d{2}/\d{4})'
+
+        # Not every statement carries one, so this is optional.
+        - name: account_no
+          using: regex
+          source: html_text
+          pattern: 'account ending in \**([\w-]+)'
+          required: false
+
+    computed:
+      remind_on:
+        using: date_shift
+        from: due_date
+        days: -3
+
+    actions:
+      # A local ledger, appended to on every new bill. Needs no API at all --
+      # a good first action while a pipeline is being developed. Each row
+      # carries a _key, so re-running after losing state does not double it.
+      - id: save_bill
+        type: file
+        path: "~/records/pge-bills-{{ email.date | date('%Y') }}.csv"
+        fields: [amount, due_date, account_no]
+
+      - id: record_bill
+        target: finance_api
+        method: POST
+        path: /bills
+        json:
+          provider: pge
+          amount: !expr amount            # stays a JSON number
+          account: "{{ account_no | default('unknown') }}"
+          billed_on: "{{ email.date | date('%Y-%m-%d') }}"
+          due_on: "{{ due_date | date('%Y-%m-%d') }}"
+          source_message_id: "{{ email.id }}"
+
+      # Actions are independent: each one sees the extracted record and
+      # nothing else, so this one neither waits for nor reads the two above.
+      # That is what lets a failed action be retried on its own.
+      - id: pay_reminder
+        target: personal_calendar
+        summary: "Pay PG&E bill ${{ amount }}"
+        start_date: !expr remind_on
+        all_day: true
+        reminders:
+          # Minutes *before the start*, and an all-day event starts at
+          # midnight -- so 900 is 9am the day before, and 0 is midnight.
+          - method: popup
+            minutes: 900
+        description: |
+          Due {{ due_date | date('%d %b %Y') }}.
+          {{ email.link }}
+
+  # ---------------------------------------------------------------------
+  # A home valuation series: one number per email, and the point is the
+  # history. Redfin has redesigned this mail four times since 2017, and the
+  # only constant is the address followed by the estimate -- so the logic
+  # lives in Python, and the config just names it.
+  # ---------------------------------------------------------------------
+  - name: redfin_home_value
+    # Two sender addresses over the years (listings@ before 2025, redmail@
+    # since), so match on the subject and keep the sender filter broad.
+    query: 'from:redfin.com subject:"1 Your Street Home Report"'
+
+    extract:
+      steps:
+        - using: python
+          module: redfin_home_report
+          # The address comes from the subject line by default. Options:
+          #   address:    say it explicitly if the subject does not carry it
+          #   window:     how far past the address to look (default 400 chars)
+          #   min_value / max_value: what counts as a believable estimate
+
+    actions:
+      - id: save_estimate
+        type: file
+        path: "~/records/home-estimates.csv"
+        fields: [report_month, estimate]
+
+      - id: record_appraisal
+        type: http                        # an absolute url needs no target
+        method: POST
+        url: https://assets.example.com/v2/home/appraisals
+        headers:
+          X-Api-Key: "${ASSETS_API_KEY}"
+        json:
+          value: !expr estimate
+          as_of: "{{ report_month | date('%Y-%m-%d') }}"
+
+  # ---------------------------------------------------------------------
+  # Reading the attached PDF instead of the email body, and doing something
+  # with your own Python. Both are ordinary steps.
+  # ---------------------------------------------------------------------
+  - name: bank_statement
+    query: 'from:statements@yourbank.example has:attachment filename:pdf'
+
+    extract:
+      steps:
+        - name: closing_balance
+          using: attachment_pdf
+          filename_match: "*.pdf"
+          passwords_env: BANK_PDF_PASSWORD   # same keys the attachments config uses
+          pattern: 'Closing Balance[:\s]+([\d,]+\.\d{2})'
+          type: money
+
+    actions:
+      - id: notify
+        type: python                       # actions/notify_phone.py, def run(...)
+        module: notify_phone
+        function: run
+        message: "Statement closing balance {{ closing_balance }}"

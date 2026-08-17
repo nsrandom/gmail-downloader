@@ -8,6 +8,7 @@ venv/
 *.log
 state/
 __pycache__/
+tmp/
 
 # Environment files
 .env
@@ -26,5 +27,6 @@ token.json
 Statements/
 
 # Extraction fixtures are real messages saved by --dump-body, so they carry
-# account numbers and addresses. Commit one only after --redact.
+# account numbers and addresses. Nothing here redacts them, so keep them out;
+# the committed tests use made-up samples instead.
 tests/fixtures/

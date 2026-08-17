@@ -1,6 +1,17 @@
 # Email pipelines — design
 
-Status: **proposal**. Nothing here is built yet.
+Status: **implemented**. See [pipelines.md](pipelines.md) for how to use it;
+this document is the reasoning behind the shape.
+
+Five things changed while building it, all noted inline below. One is a real
+reversal: **actions no longer read each other's results** — the dependency
+graph this document originally described cannot survive its own retry path,
+and the reasoning is written out under [Ordering and
+independence](#ordering-and-independence). The rest are smaller: duplicate
+protection on calendar events uses a deterministic event id rather than
+`iCalUID`; an `html_text` source was added; modes that perform nothing request
+no extra OAuth scopes; and `--freeze` was added to record an extraction as a
+fixture's expectation.
 
 Decisions taken so far: Jinja2 for templating, with an explicit tag for
 type-preserving values; retries re-extract from Gmail rather than replaying a
@@ -197,7 +208,6 @@ pipelines:
         all_day: true
         description: |
           Due {{ due_date | date('%d %b %Y') }}.
-          Recorded as bill {{ actions.save_bill.response.id | default('?') }}.
           {{ email.link }}
 
   - name: redfin_home_value
@@ -272,6 +282,19 @@ Steps see the record built so far. A step's own config is rendered as a
 earlier one's value — declarative steps included, not only Python ones. Regex
 `pattern` is the one key that is never rendered, so `\d{2}` needs no escaping.
 
+*Added during implementation:* `fallbacks:` — alternative extractors for the
+same field, tried in order. The first real config needed it immediately: PG&E
+has used three layouts in four years (a prose sentence, then text labels, then
+labels as images), and mail already in the mailbox does not change to match. So
+"the sender redesigned" is not an edge case here, it is the normal condition of
+any pipeline more than a year old, and the alternative — three near-identical
+steps writing the same field, with `required` semantics that stop making sense
+— is worse. A fallback inherits the field's identity and brings only its own
+way of finding the value. Two rules keep it from hiding problems: a match that
+fails coercion falls through to the next candidate, and a malformed selector or
+pattern raises rather than falling through, since it would fail on every
+message and a silent data gap is the worst outcome available.
+
 ### Builtin step types
 
 | `using` | Purpose | Key options |
@@ -291,9 +314,14 @@ text-layer PDFs and not scans — a scanned bill needs OCR and is out of scope.
 
 ### Sources
 
-`source` selects what a step reads: `html`, `text`, `subject`, `headers`, or
-`attachment:pdf`. Set once on `extract` as the default, overridable per step.
-`html` falls back to the text part when a message has no HTML, and logs it.
+`source` selects what a step reads: `html`, `html_text`, `text`, `subject`, or
+`headers`. Set once on `extract` as the default, overridable per step. `html`
+falls back to the text part when a message has no HTML, and logs it.
+
+*Added during implementation:* `html_text` — the visible text of the HTML with
+tags stripped — turned out to be the better regex target most of the time.
+Senders nest values four tables deep, and a pattern over rendered text survives
+a layout change that a pattern over raw markup does not.
 
 ### Types
 
@@ -346,7 +374,6 @@ The context namespace:
 | --- | --- |
 | the record's own keys | `{amount}`, `{due_date}`, … |
 | `email` | `id`, `thread_id`, `subject`, `sender`, `to`, `date`, `link`, `headers` |
-| `actions` | `{actions.<id>.response}` — whatever a completed action returned |
 | `pipeline` | `name` |
 | `run` | `started_at` |
 
@@ -384,29 +411,53 @@ Every action's config for a message is rendered up front, and a template error
 fails the message with **zero** side effects. Otherwise a typo in action 3
 surfaces only after action 1 has already POSTed a real bill.
 
-The consequence for chained actions: `{{ actions.save_bill.response.id }}` is
-not resolvable at pre-render time. Those references are detected during the
-pre-render pass (which establishes the dependency graph, below), left as
-placeholders, and resolved immediately before the dependent action runs.
+Only the actions that will actually run are rendered: one excluded by
+`--only-action` or `--skip-action` is not resolved at all, so its target's
+`${VAR}`s need not be exported to run the others.
 
 ## Actions
 
-Every action entry has an `id` unique within its pipeline (it is the state key
-and the handle other actions reference) and either a `target` naming an entry
-under `targets:`, or an inline `type`. Remaining keys are the action's own,
-rendered before the action sees them.
+Every action entry has an `id` unique within its pipeline (it is the state
+key) and either a `target` naming an entry under `targets:`, or an inline
+`type`. Remaining keys are the action's own, rendered before the action sees
+them, with anything left unset filled from `defaults:` — `http_timeout`
+becomes an `http` action's `timeout`, `timezone` a calendar event's. Without
+that, `defaults:` would be a table only the runner itself reads.
 
-### Ordering and dependencies
+### Ordering and independence
 
 Actions run in declaration order. When one fails, the rest still run — a
 calendar reminder should not be lost because an unrelated API was down.
 
-The exception is a **dependent** action. The pre-render pass records which
-actions reference `actions.<id>` in their templates, and an action whose
-upstream did not finish `ok` is skipped and recorded `blocked` rather than run
-with a missing value. Inferring this from the templates beats an explicit
-`depends_on:` key, which would silently drift out of sync the first time
-someone edits a description.
+*Changed during implementation:* actions are **independent**. Each sees the
+record and nothing else; none can read what another returned.
+
+The original design here let a later action reference `{{ actions.<id>.response }}`,
+with a dependency graph inferred from the templates and dependents recorded
+`blocked` when an upstream had not finished `ok`. Building it showed the flaw,
+and it is worth writing down because the feature reads so reasonably.
+
+State tracks *statuses*, not results. So on the run after a partial failure,
+the upstream action is skipped — it already succeeded — and its result is
+therefore absent from this run's results. The dependent action is then blocked
+by an action that *did* succeed, on every subsequent run, until the message
+hits `max_attempts` and is marked dead. The calendar reminder in the example
+config, whose description referenced the bill it had just recorded, would be
+lost silently and permanently, and the log line would blame an action that was
+working fine. `--only-action` on a dependent action failed the same way.
+
+The repairs available were all worse than the feature: persist every action's
+result in state (state grows a payload, and a "debugging copy" becomes load
+bearing), or re-run the upstream to regenerate it (a second POST, defended
+only by an idempotency key the far end may ignore — see below).
+
+Independence removes the whole class. Every action is retriable on its own,
+which is what per-action state promised in the first place. Two sinks needing
+the same value is not a real loss either: the value belongs in the record,
+where `computed:` can put it, rather than travelling between actions.
+Referring to `actions.<id>` now raises at pre-render, before anything runs, so
+a config written against the old shape fails loudly rather than POSTing a
+description with a hole in it.
 
 ### Secrets in logs
 
@@ -455,8 +506,8 @@ Targets whose API insists on strings can set `money_format: string`.
 
 Sends an `Idempotency-Key` header derived from
 `pipeline + message id + action id` (see below). Returns
-`{"status": 201, "response": <parsed JSON or raw text>, "headers": {...}}`, so
-templates read `{{ actions.save_bill.response.<field> }}`.
+`{"status": 201, "response": <parsed JSON or raw text>, "headers": {...}}`,
+which is logged at debug level — no other action can read it.
 
 ### `google_calendar`
 
@@ -467,8 +518,28 @@ templates read `{{ actions.save_bill.response.<field> }}`.
 | `start_date` / `start_datetime`, `all_day`, `duration_minutes`, `timezone` | when |
 | `reminders` | list of `{method, minutes}` |
 
-Sets a deterministic `iCalUID`, so Google itself rejects a duplicate even if
+Sets a deterministic **event id**, so Google itself rejects a duplicate even if
 local state was lost. Returns the created event.
+
+*Changed during implementation:* this said `iCalUID`, which the Calendar API
+only accepts through `events.import`. `events.insert` takes a caller-supplied
+`id` and answers a repeat with 409 — the same protection through a supported
+door, and that 409 counts as success. Event ids must be base32hex, so the
+idempotency key is re-encoded rather than used as the hex digest it starts as.
+
+### `file`
+
+Appends the record to a file — jsonl, csv, or a free-text line — so a pipeline
+can keep a local ledger without an API at the other end.
+
+This is the one sink with no remote idempotency to lean on, and it is worth
+saying why that matters rather than quietly appending. HTTP has
+`Idempotency-Key`; Calendar has the event id; a file has nobody to ask, so a
+lost state file means a doubled row in something you later add up. Each row
+therefore carries `_key` of `<message_id>:<action_id>`, and the file is scanned
+for that key before a write. A linear scan is the right trade at a few hundred
+rows a year, and it makes the file itself the source of truth rather than
+`state/`. The free-text format cannot do this and says so.
 
 ### `python`
 
@@ -595,12 +666,12 @@ puts it straight back through the pipeline for a second POST.
 
 State is not the only defence. Every action also carries a deterministic
 idempotency key, `sha256(pipeline + message_id + action_id)`, sent as
-`Idempotency-Key` for HTTP and as `iCalUID` for calendar events, so a lost or
+`Idempotency-Key` for HTTP and as the event id for calendar events, so a lost or
 hand-edited state file cannot cause a double POST at a server that honours it.
 This is cheap now and near-impossible to retrofit.
 
 Its strength differs by sink, and the doc should not pretend otherwise. Google
-genuinely enforces `iCalUID`, with the wrinkle that deleting an event and
+genuinely enforces the event id, with the wrinkle that deleting an event and
 re-running can 409 on the recycled id — treated as success. `Idempotency-Key`
 is a convention a self-built API most likely ignores, so it is free insurance
 rather than a guarantee: state remains the real protection.
@@ -619,6 +690,15 @@ So: each action class declares the scopes it needs, the runner unions the
 scopes the loaded config actually uses, and the token is cached per scope set
 at `state/token_<hash>.json`. A pipelines config with no Google actions asks
 for `gmail.readonly` only. The attachments runner's token is never touched.
+
+*Added during implementation:* the union covers only the actions that will
+actually run. `--explain`, `--dump-body`, and `--dry-run` perform nothing, and
+`--skip-action` excludes what it names, so none of them request anything
+beyond read-only Gmail. Without that, looking at what a calendar pipeline
+extracts drags you through a consent screen for an event you were not going to
+create — which is exactly what happened the first time the runner was pointed
+at a real message. A dry run logs which scopes the real run will want, so the
+consent screen is never a surprise.
 
 Auth failures reuse the existing `AuthError` treatment — a printed, actionable
 message rather than a traceback — moved into `core/auth.py`.
@@ -641,6 +721,7 @@ python pipelines_runner.py --dry-run
 | `--explain` | Extract and print the record as a table; run no actions |
 | `--dump-body ID` | Write the HTML and text parts into `tests/fixtures/<pipeline>/` |
 | `--replay` | Run extraction against saved fixtures, offline, and diff against expectations |
+| `--freeze` | With `--replay`: record the current extraction as the expectation |
 | `--only-action ID`, `--skip-action ID` | Restrict which actions run |
 | `--since YYYY-MM-DD` | Override the incremental window |
 | `--limit N` | Process at most N messages |
@@ -657,7 +738,7 @@ utility company's marketing HTML is the actual work of adding a pipeline, and
 | Required field missing | Per `on_missing_field`: `fail` records the message as failed and moves on (default), `skip` drops the message without recording it, `warn` continues with the field absent |
 | Optional field missing | `default` if given, else the key is absent from the record |
 | Template error | The message fails before **any** action runs, so a typo cannot leave a half-applied message behind |
-| Action raises | That action is recorded failed with the reason; independent actions still run, and actions that reference it are recorded `blocked` |
+| Action raises | That action is recorded failed with the reason; every other action still runs, and the next run retries only the failed one |
 | Action fails repeatedly | After `max_attempts` (default 5) the message is marked `dead` and skipped, with one loud log line. It never blocks the pipeline. |
 | Gmail API error | Logged per message; the run continues |
 | Auth error | Run stops, actionable message printed |
