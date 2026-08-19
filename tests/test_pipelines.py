@@ -413,6 +413,97 @@ def test_redfin_falls_back_to_the_email_month():
 
 
 # --------------------------------------------------------------------------
+# extractors/mv_utilities_bill.py
+# --------------------------------------------------------------------------
+
+# The three wordings Paymentus has sent for the City of Mountain View. The
+# sentence never moves; the label does, and the newest one states no "$".
+MV_2015 = """<html><body><div>
+<p>Dear Customer,</p>
+<p>Your <strong>The City of Mountain View bill</strong> is now available for account number:
+<strong>604056400003</strong>
+<br /><br />Total of your current bill: <strong>$179.05</strong>
+<br />Bill due date: <strong>May 18, 2016</strong></p>
+</div></body></html>"""
+
+MV_2017 = """<html><body><div>
+<p>Dear Sample Customer,</p>
+<p>Your <strong>The City of Mountain View bill</strong> is now available for account number:
+<strong>604056400003</strong>
+<br /><br />Total amount: <strong>$305.02</strong>
+<br />Bill due date: <strong>Jul 12, 2017</strong></p>
+</div></body></html>"""
+
+# The 2023 redesign: a table, &nbsp; between every label and its value, and
+# the currency symbol gone.
+MV_2023 = """<html><body><table><tbody><tr><td><div>
+<p>Dear&nbsp;Sample&nbsp;Customer,</p>
+<p>Your&nbsp;CMVW bill is now available for account number&nbsp;604056400003</p>
+<p><b>Total amount:&nbsp;446.50</b></p>
+<p><b>Bill due date:&nbsp;Nov 15, 2023</b></p>
+</div></td></tr></tbody></table></body></html>"""
+
+MV_PYTHON_STEP = {"steps": [{"using": "python", "module": "mv_utilities_bill"}]}
+
+
+def mv_email(html, when=datetime(2023, 10, 18, 0, 31)):
+    return Email(id="mv1", thread_id="t", headers={"subject": "Your bill is ready",
+                 "from": "billNotif@mountainview.gov"}, date=when, html=html)
+
+
+@pytest.mark.parametrize("html,amount,due", [
+    (MV_2015, Decimal("179.05"), date(2016, 5, 18)),
+    (MV_2017, Decimal("305.02"), date(2017, 7, 12)),
+    (MV_2023, Decimal("446.50"), date(2023, 11, 15)),
+])
+def test_mv_reads_every_wording(html, amount, due):
+    from extractors import run_extract
+
+    record = run_extract(mv_email(html), MV_PYTHON_STEP)
+    assert record["amount"] == amount
+    assert record["due_date"] == due
+    assert record["account_no"] == "604056400003"
+    assert record["bill_date"] == date(2023, 10, 18)     # the day the mail arrived
+
+
+def test_mv_does_not_read_the_account_number_as_an_amount():
+    """Nothing but the cents separates the two once the "$" is gone."""
+    from extractors.mv_utilities_bill import extract
+
+    assert extract(mv_email(MV_2023), {}, {})["amount"] == Decimal("446.50")
+
+
+@pytest.mark.parametrize("due,expected", [
+    ("Jan 9, 2019", date(2019, 1, 9)),          # unpadded, as the older mail sends
+    ("Jan 08, 2025", date(2025, 1, 8)),         # padded, as the newer mail sends
+    ("January 8, 2025", date(2025, 1, 8)),      # not seen yet, but cheap to accept
+])
+def test_mv_reads_the_due_date_however_it_is_spelled(due, expected):
+    from extractors.mv_utilities_bill import extract
+
+    html = MV_2023.replace("Nov 15, 2023", due)
+    assert extract(mv_email(html), {}, {})["due_date"] == expected
+
+
+def test_mv_account_number_is_optional():
+    from extractors.mv_utilities_bill import extract
+
+    html = MV_2023.replace("for account number&nbsp;604056400003", "")
+    record = extract(mv_email(html), {}, {})
+    assert "account_no" not in record
+    assert record["amount"] == Decimal("446.50")
+
+
+def test_mv_says_what_to_do_on_a_fourth_wording():
+    from extractors import ExtractionError
+    from extractors.mv_utilities_bill import extract
+
+    html = "<html><body><p>Your bill is ready</p><p>Bill due date: Nov 15, 2023</p></body></html>"
+    with pytest.raises(ExtractionError, match="no amount in this Mountain View bill"):
+        extract(mv_email(html), {}, {})
+
+
+# --------------------------------------------------------------------------
 # Coercion
 # --------------------------------------------------------------------------
 
